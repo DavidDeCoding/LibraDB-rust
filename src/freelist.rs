@@ -64,7 +64,7 @@ impl Freelist {
         let released_page_count = usize::from_le_bytes(u64_bytes);
 
         let mut released_pages = vec![];
-        for i in 0..released_page_count {
+        for _ in 0..released_page_count {
             for i in 0..PAGE_ID_SIZE {
                 u64_bytes[i] = buf[pos+i];
             }

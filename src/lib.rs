@@ -1,6 +1,6 @@
 pub mod dal;
-// pub mod tx;
-// pub mod db;
+pub mod tx;
+pub mod db;
 pub mod meta;
 pub mod freelist;
 pub mod collection;

@@ -1,7 +1,6 @@
-use std::mem;
 use crate::consts::{PAGE_ID_SIZE, PAGE_SIZE};
-use crate::dal::DAL;
 use crate::error::CustomError;
+use crate::tx::Tx;
 
 #[derive(Clone, Debug)]
 pub struct Item {
@@ -41,24 +40,16 @@ impl Node
         self.child_nodes.len() == 0
     }
 
-    pub fn new(items: Vec<Item>, child_nodes: Vec<u64>) -> Node {
+    pub fn new(page_id: u64, items: Vec<Item>, child_nodes: Vec<u64>) -> Node {
         Node {
-            page_id: u64::MAX,
+            page_id,
             items,
             child_nodes,
         }
     }
 
-    pub fn empty() -> Node {
-        Node {
-            page_id: u64::MAX,
-            items: vec![],
-            child_nodes: vec![],
-        }
-    }
-
-    pub fn write_self_node(&mut self, dal: &mut DAL) {
-        match dal.write_node(self) {
+    pub fn write_self_node(&mut self, tx: &mut Tx) {
+        match tx.write_node(self) {
             Ok(()) => {},
             Err(error) => {
                 panic!("{:?}", error);
@@ -66,8 +57,8 @@ impl Node
         }
     }
 
-    pub fn write_node(&self, node: &mut Node, dal: &mut DAL) {
-        match dal.write_node(node) {
+    pub fn write_node(&self, node: &mut Node, tx: &mut Tx) {
+        match tx.write_node(node) {
             Ok(()) => {},
             Err(error) => {
                 panic!("{:?}", error);
@@ -75,30 +66,30 @@ impl Node
         }
     }
 
-    pub fn write_nodes(&self, nodes: Vec<&mut Node>, dal: &mut DAL) {
+    pub fn write_nodes(&self, nodes: Vec<&mut Node>, tx: &mut Tx) {
         for node in nodes {
-            self.write_node(node, dal);
+            self.write_node(node, tx);
         }
     }
 
-    fn get_node(&self, page_num: u64, dal: &mut DAL) -> Result<Node, CustomError> {
-        dal.get_node(page_num)
+    fn get_node(&self, page_num: u64, tx: &mut Tx) -> Result<Node, CustomError> {
+        tx.get_node(page_num)
     }
 
-    pub fn is_over_populated(&self, dal: &DAL) -> bool {
-        dal.is_over_populated(self)
+    pub fn is_over_populated(&self, tx: &Tx) -> bool {
+        tx.db.dal.is_over_populated(self)
     }
 
-    pub fn can_spare_an_element(&self, dal: &DAL) -> bool {
-        let split_index = dal.get_split_index(self);
+    pub fn can_spare_an_element(&self, tx: &Tx) -> bool {
+        let split_index = tx.db.dal.get_split_index(self);
         if split_index == usize::MAX {
             return false;
         }
         return true;
     }
 
-    pub fn is_under_populated(&self, dal: &DAL) -> bool {
-        dal.is_under_populated(self)
+    pub fn is_under_populated(&self, tx: &Tx) -> bool {
+        tx.db.dal.is_under_populated(self)
     }
 
     pub fn serialize(&self) -> [u8; PAGE_SIZE] {
@@ -162,7 +153,7 @@ impl Node
     }
 
     pub fn deserialize(buf: [u8; PAGE_SIZE]) -> Result<Node, CustomError> {
-        let mut node = Node::empty();
+        let mut node = Node::new(u64::MAX, vec![], vec![]);
 
         let mut left_pos = 0;
 
@@ -221,7 +212,6 @@ impl Node
             match String::from_utf8(buf[offset..offset+val_len].to_vec()) {
                 Ok(string) => {
                     value = string;
-                    offset += val_len;
                 }
                 Err(error) => {
                     return Err(CustomError::new(error.to_string()));
@@ -235,7 +225,6 @@ impl Node
             for n in 0..PAGE_ID_SIZE {
                 u64_bytes[n] = buf[left_pos+n];
             }
-            left_pos += PAGE_ID_SIZE;
             node.child_nodes.push(u64::from_le_bytes(u64_bytes));
         }
 
@@ -272,16 +261,16 @@ impl Node
         size
     }
 
-    pub fn find_key(&self, key: &String, exact: bool, dal: &mut DAL) -> Result<(usize, Node, Vec<usize>), CustomError> {
+    pub fn find_key(&self, key: &String, exact: bool, tx: &mut Tx) -> Result<(usize, Node, Vec<usize>), CustomError> {
         let mut ancestors_indexes = vec![0];
-
-        match Self::find_key_helper(self.clone(), key, exact, &mut ancestors_indexes, dal) {
+        
+        match Self::find_key_helper(self.clone(), key, exact, &mut ancestors_indexes, tx) {
             Ok((index, containing_node)) => Ok((index, containing_node, ancestors_indexes)),
             Err(error) => Err(error)
         }
     }
 
-    fn find_key_helper(node: Node, key: &String, exact: bool, ancestor_indexes: &mut Vec<usize>, dal: &mut DAL) -> Result<(usize, Node), CustomError> {
+    fn find_key_helper(node: Node, key: &String, exact: bool, ancestor_indexes: &mut Vec<usize>, tx: &mut Tx) -> Result<(usize, Node), CustomError> {
         let (was_found, index) = node.find_key_in_node(key);
         if was_found {
             return Ok((index, node))
@@ -296,8 +285,8 @@ impl Node
 
         (*ancestor_indexes).push(index);
 
-        match node.get_node(node.child_nodes[index], dal) {
-            Ok(next_child) => Self::find_key_helper(next_child, key, exact, ancestor_indexes, dal),
+        match node.get_node(node.child_nodes[index], tx) {
+            Ok(next_child) => Self::find_key_helper(next_child, key, exact, ancestor_indexes, tx),
             Err(error) => Err(error)
         }
     }
@@ -316,12 +305,12 @@ impl Node
         (false, self.items.len())
     }
 
-    pub fn split(&mut self, node_to_split: &mut Node, node_to_split_index: usize, dal: &mut DAL) {
-        let split_index = dal.get_split_index(node_to_split); // Add split index
+    pub fn split(&mut self, node_to_split: &mut Node, node_to_split_index: usize, tx: &mut Tx) {
+        let split_index = tx.db.dal.get_split_index(node_to_split); // Add split index
 
         let middle_item = node_to_split.items.remove(split_index);
         
-        let mut new_node = Node::new(vec![], vec![]);
+        let mut new_node = tx.new_node(vec![], vec![]);
 
         if node_to_split.is_leaf() {
             new_node.items.extend(node_to_split.items.split_off(split_index));
@@ -330,7 +319,7 @@ impl Node
             new_node.child_nodes.extend(node_to_split.child_nodes.split_off(split_index + 1));
         }
         
-        match dal.write_node(&mut new_node) {
+        match tx.write_node(&mut new_node) {
             Ok(()) => {},
             Err(error) => {
                 panic!("{:?}", error);
@@ -344,26 +333,26 @@ impl Node
             self.child_nodes.insert(node_to_split_index + 1, new_node.page_id);
         }
 
-        self.write_self_node(dal);
-        self.write_node(node_to_split, dal);
+        self.write_self_node(tx);
+        self.write_node(node_to_split, tx);
     }
 
-    pub fn remove_item_from_leaf(&mut self, index: usize, dal: &mut DAL) {
+    pub fn remove_item_from_leaf(&mut self, index: usize, tx: &mut Tx) {
         self.items.remove(index);
-        self.write_self_node(dal);
+        self.write_self_node(tx);
     }
 
-    pub fn remove_item_from_internal(&mut self, index: usize, dal: &mut DAL) -> Result<Vec<usize>, CustomError> {
+    pub fn remove_item_from_internal(&mut self, index: usize, tx: &mut Tx) -> Result<Vec<usize>, CustomError> {
         let mut affected_nodes = vec![];
         affected_nodes.push(index);
 
-        let mut a_node_res = self.get_node(self.child_nodes[index], dal);
+        let mut a_node_res = self.get_node(self.child_nodes[index], tx);
         
         while let Ok(ref mut a_node) = a_node_res {
             if !a_node.is_leaf() {
                 let traversing_index = self.child_nodes.len() - 1;
                 
-                match a_node.get_node(a_node.child_nodes[traversing_index], dal) {
+                match a_node.get_node(a_node.child_nodes[traversing_index], tx) {
                     Ok(node) => {
                         a_node_res = Ok(node);
                     }
@@ -381,8 +370,8 @@ impl Node
         match a_node_res {
             Ok(ref mut a_node) => {
                 self.items[index] = a_node.items.pop().unwrap();
-                self.write_self_node(dal);
-                self.write_node(a_node, dal);
+                self.write_self_node(tx);
+                self.write_node(a_node, tx);
 
                 Ok(affected_nodes)
             }
@@ -428,8 +417,8 @@ impl Node
         }
     }
 
-    fn merge(&mut self, b_node: &mut Node, b_node_index: usize, dal: &mut DAL) -> Result<(), CustomError> {
-        let mut a_node = self.get_node(self.child_nodes[b_node_index-1], dal);
+    fn merge(&mut self, b_node: &mut Node, b_node_index: usize, tx: &mut Tx) -> Result<(), CustomError> {
+        let mut a_node = self.get_node(self.child_nodes[b_node_index-1], tx);
         match a_node {
             Ok(ref mut a_node) => {
                 let p_node_item = self.items.remove(b_node_index-1);
@@ -441,9 +430,9 @@ impl Node
                     a_node.child_nodes.extend(b_node.child_nodes.drain(0..));
                 }
 
-                self.write_self_node(dal);
-                self.write_node(a_node, dal);
-                dal.delete_node(b_node);
+                self.write_self_node(tx);
+                self.write_node(a_node, tx);
+                tx.delete_node(b_node);
 
                 Ok(())
             }
@@ -451,16 +440,16 @@ impl Node
         }
     }
 
-    pub fn rebalance_remove(&mut self, unbalanced_node: &mut Node, unbalanced_node_index: usize, dal: &mut DAL) -> Result<(), CustomError> {
+    pub fn rebalance_remove(&mut self, unbalanced_node: &mut Node, unbalanced_node_index: usize, tx: &mut Tx) -> Result<(), CustomError> {
         if unbalanced_node_index != 0 {
-            let left_node = self.get_node(self.child_nodes[unbalanced_node_index-1], dal);
+            let left_node = self.get_node(self.child_nodes[unbalanced_node_index-1], tx);
             match left_node {
                 Ok(mut left_node) => {
-                    if left_node.can_spare_an_element(dal) {
+                    if left_node.can_spare_an_element(tx) {
                         Self::rotate_right(&mut left_node, self, unbalanced_node, unbalanced_node_index);
                         
-                        self.write_self_node(dal);
-                        self.write_nodes(vec![&mut left_node, unbalanced_node], dal);
+                        self.write_self_node(tx);
+                        self.write_nodes(vec![&mut left_node, unbalanced_node], tx);
                         
                         return Ok(());
                     }
@@ -473,14 +462,14 @@ impl Node
         }
 
         if unbalanced_node_index != self.child_nodes.len() - 1 {
-            let right_node = self.get_node(self.child_nodes[unbalanced_node_index+1], dal);
+            let right_node = self.get_node(self.child_nodes[unbalanced_node_index+1], tx);
             match right_node {
                 Ok(mut right_node) => {
-                    if right_node.can_spare_an_element(dal) {
+                    if right_node.can_spare_an_element(tx) {
                         Self::rotate_left(unbalanced_node, self, &mut right_node, unbalanced_node_index);
                         
-                        self.write_self_node(dal);
-                        self.write_nodes(vec![unbalanced_node, &mut right_node], dal);
+                        self.write_self_node(tx);
+                        self.write_nodes(vec![unbalanced_node, &mut right_node], tx);
                         
                         return Ok(());
                     }
@@ -493,10 +482,10 @@ impl Node
         }
 
         if unbalanced_node_index == 0 {
-            let mut right_node = self.get_node(self.child_nodes[unbalanced_node_index+1], dal);
+            let mut right_node = self.get_node(self.child_nodes[unbalanced_node_index+1], tx);
             match right_node {
                 Ok(ref mut right_node) => {
-                    return self.merge(right_node, unbalanced_node_index+1, dal);
+                    return self.merge(right_node, unbalanced_node_index+1, tx);
                 }
                 Err(error) => {
                     return Err(error)
@@ -505,7 +494,7 @@ impl Node
         }
 
         
-        self.merge(unbalanced_node, unbalanced_node_index, dal)
+        self.merge(unbalanced_node, unbalanced_node_index, tx)
     }
 }
 

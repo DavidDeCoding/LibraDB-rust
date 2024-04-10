@@ -1,4 +1,4 @@
-use crate::{consts::PAGE_SIZE, error::CustomError, freelist::{self, Freelist}, meta::{Meta, META_PAGE_NUM}, node::{Item, Node}};
+use crate::{consts::PAGE_SIZE, error::CustomError, freelist::Freelist, meta::{Meta, META_PAGE_NUM}, node::Node};
 use std::{fs::File, io::{Read, Seek, SeekFrom, Write}};
 use std::path::Path;
 
@@ -58,14 +58,33 @@ impl DAL {
                         }
                     }
                     
-                    match dal.meta.as_mut() {
-                        Some(meta) => {
+                    match dal.meta {
+                        Some(ref mut meta) => {
                             meta.freelist_page = page_id;
                         }
-                        None => {}
+                        None => {
+                            return Err(CustomError::new("Meta not created correctly".to_string()));
+                        }
                     }
                     match dal.write_freelist() {
                         Ok(_) => {},
+                        Err(error) => {
+                            return Err(error);
+                        }
+                    }
+                    
+                    let mut root_collection = Node::new(u64::MAX, vec![], vec![]);
+                    match dal.write_node(&mut root_collection) {
+                        Ok(()) => {
+                            match dal.meta {
+                                Some(ref mut meta) => {
+                                    meta.root = root_collection.page_id;
+                                }
+                                None => {
+                                    return Err(CustomError::new("Meta not created correctly".to_string()));
+                                }
+                            }
+                        }
                         Err(error) => {
                             return Err(error);
                         }
@@ -121,7 +140,7 @@ impl DAL {
         }
     }
 
-    fn get_next_page(&mut self) -> Result<u64, CustomError> {
+    pub fn get_next_page(&mut self) -> Result<u64, CustomError> {
         match self.freelist {
             Some(ref mut freelist) => Ok(freelist.get_next_page()),
             None => Err(CustomError::new("Freelist not initialized".to_string()))
@@ -163,7 +182,7 @@ impl DAL {
         }
     }
 
-    fn write_freelist(&mut self) -> Result<Page, CustomError> {
+    pub fn write_freelist(&mut self) -> Result<Page, CustomError> {
         let mut page = self.allocate_empty_page();
         match self.meta.as_ref() {
             Some(meta) => {

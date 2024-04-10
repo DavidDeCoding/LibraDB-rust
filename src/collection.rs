@@ -1,9 +1,11 @@
+use crate::consts::{COLLECTION_SIZE, PAGE_ID_SIZE};
 use crate::error::CustomError;
 use crate::node::{Item, Node};
-use crate::dal::DAL;
+use crate::tx::Tx;
 
+#[derive(Debug)]
 pub struct Collection {
-    name: String,
+    pub name: String,
     root: u64,
     counter: u64
 }
@@ -26,18 +28,58 @@ impl Collection  {
         }
     }
 
+    pub fn serialize(&mut self) -> Item {
+        let mut bytes: [u8; COLLECTION_SIZE] = [0u8; COLLECTION_SIZE];
+        
+        let mut left_pos = 0;
+        bytes[left_pos..left_pos+PAGE_ID_SIZE].clone_from_slice(&self.root.to_le_bytes());
+        left_pos += PAGE_ID_SIZE;
+
+        bytes[left_pos..left_pos+PAGE_ID_SIZE].clone_from_slice(&self.counter.to_le_bytes());
+        
+        let bytes_as_str = unsafe {
+            std::str::from_utf8_unchecked(&bytes)
+        };
+        Item::new(self.name.clone(), bytes_as_str.to_owned())
+
+    }
+
+    pub fn deserialize(item: Item) -> Collection {
+        let mut collection = Collection::empty();
+        collection.name = item.key;
+
+        if item.value.len() > 0 {
+            let buf = item.value.as_bytes();
+
+            let mut left_pos = 0;
+            let mut u64_bytes = [0u8; PAGE_ID_SIZE];
+            for n in 0..PAGE_ID_SIZE {
+                u64_bytes[n] = buf[left_pos+n];
+            }
+            left_pos += PAGE_ID_SIZE;
+            collection.root = u64::from_le_bytes(u64_bytes);
+
+            u64_bytes = [0u8; PAGE_ID_SIZE];
+            for n in 0..PAGE_ID_SIZE {
+                u64_bytes[n] = buf[left_pos+n];
+            }
+            collection.counter = u64::from_le_bytes(u64_bytes);
+        }
+
+        collection
+    }
+
     pub fn id(&mut self) -> u64 {
         let id = self.counter;
         self.counter += 1;
         return id;
     }
 
-    pub fn find(&mut self, key: String, dal: &mut DAL) -> Result<Option<Item>, CustomError> {
-
-        let root = dal.get_node(self.root);
+    pub fn find(&mut self, key: String, tx: &mut Tx) -> Result<Option<Item>, CustomError> {
+        let root = tx.get_node(self.root);
         match root {
             Ok(root) => {
-                match root.find_key(&key, true, dal) {
+                match root.find_key(&key, true, tx) {
                     Ok((index, containing_node, _)) => {
                         if index == usize::MAX {
                             return Ok(None);
@@ -54,13 +96,13 @@ impl Collection  {
         
     }
 
-    pub fn put(&mut self, key: String, value: String, dal: &mut DAL) -> Result<(), CustomError> {
+    pub fn put(&mut self, key: String, value: String, tx: &mut Tx) -> Result<(), CustomError> {
 
         let item = Item::new(key, value);
         let mut root: Node;
         if self.root == u64::MAX {
-            root = Node::empty();
-            match dal.write_node(&mut root) {
+            root = tx.new_node(vec![], vec![]);
+            match tx.write_node(&mut root) {
                 Ok(()) => {
                     self.root = root.page_id;
                 }
@@ -68,9 +110,8 @@ impl Collection  {
                     return Err(error);
                 }
             }
-            
         } else {
-            match dal.get_node(self.root) {
+            match tx.get_node(self.root) {
                 Ok(_root) => {
                     root = _root;
                 }
@@ -80,10 +121,9 @@ impl Collection  {
             }
         }
 
-        match root.find_key(&item.key, false, dal) {
+        match root.find_key(&item.key, false, tx) {
             Ok((insertion_index, node_to_insert_in, ancestors_index)) => {
                 let mut node_to_insert_in = node_to_insert_in;
-
                 
                 if insertion_index < node_to_insert_in.items.len() && node_to_insert_in.items[insertion_index].key == *(&item.key) {
                     node_to_insert_in.items[insertion_index] = item;
@@ -91,17 +131,17 @@ impl Collection  {
                     node_to_insert_in.add_item(item, insertion_index);
                 }
                 
-                node_to_insert_in.write_self_node(dal);
+                node_to_insert_in.write_self_node(tx);
 
-                match self.get_nodes(&ancestors_index, dal) {
+                match self.get_nodes(&ancestors_index, tx) {
                     Ok(mut ancestors) => {
                         if ancestors.len() >= 2 {
                             for i in (0..=ancestors.len()-2).rev() {
                                 let mut p_node = ancestors[i].clone();
                                 let mut node = ancestors[i+1].clone();
                                 let node_index = ancestors_index[i+1];
-                                if node.is_over_populated(dal) {
-                                    p_node.split(&mut node, node_index, dal);
+                                if node.is_over_populated(tx) {
+                                    p_node.split(&mut node, node_index, tx);
                                 }
                                 ancestors[i] = p_node;
                                 ancestors[i+1] = node;
@@ -109,11 +149,11 @@ impl Collection  {
                         }
                         
                         let mut root = ancestors[0].clone();
-                        if root.is_over_populated(dal) {
-                            let mut new_root = Node::new(vec![], vec![root.page_id]);
-                            new_root.split(&mut root, 0, dal);
+                        if root.is_over_populated(tx) {
+                            let mut new_root = tx.new_node(vec![], vec![root.page_id]);
+                            new_root.split(&mut root, 0, tx);
 
-                            match dal.write_node(&mut new_root) {
+                            match tx.write_node(&mut new_root) {
                                 Ok(()) => {
                                     self.root = new_root.page_id;
                                 },
@@ -137,10 +177,10 @@ impl Collection  {
         
     }
 
-    pub fn remove(&mut self, key: String, dal: &mut DAL) -> Result<(), CustomError> {
-        match dal.get_node(self.root) {
+    pub fn remove(&mut self, key: String, tx: &mut Tx) -> Result<(), CustomError> {
+        match tx.get_node(self.root) {
             Ok(root) => {
-                match root.find_key(&key, true, dal) {
+                match root.find_key(&key, true, tx) {
                     Ok((remove_item_index, mut node_to_remove_from, mut ancestor_indexes)) => {
 
                         if remove_item_index == usize::MAX {
@@ -148,23 +188,23 @@ impl Collection  {
                         }
 
                         if node_to_remove_from.is_leaf() {
-                            node_to_remove_from.remove_item_from_leaf(remove_item_index, dal);
+                            node_to_remove_from.remove_item_from_leaf(remove_item_index, tx);
                         } else {
-                            match node_to_remove_from.remove_item_from_internal(remove_item_index, dal) {
+                            match node_to_remove_from.remove_item_from_internal(remove_item_index, tx) {
                                 Ok(affected_nodes) => {
                                     ancestor_indexes.extend(affected_nodes);
 
-                                    match self.get_nodes(&ancestor_indexes, dal) {
+                                    match self.get_nodes(&ancestor_indexes, tx) {
                                         Ok(mut ancestors) => {
                                             for i in (0..=ancestors.len()-2).rev() {
                                                 let mut p_node = ancestors[i].clone();
                                                 let mut node = ancestors[i+1].clone();
-                                                if node.is_under_populated(dal) {
-                                                    match p_node.rebalance_remove(&mut node, ancestor_indexes[i+1], dal) {
+                                                if node.is_under_populated(tx) {
+                                                    match p_node.rebalance_remove(&mut node, ancestor_indexes[i+1], tx) {
                                                         Ok(()) => {
                                                             let root = ancestors[0].clone();
                                                             if root.items.len() == 0 && root.child_nodes.len() > 0 {
-                                                                dal.delete_node(&root);
+                                                                tx.delete_node(&root);
                                                                 self.root = ancestors[1].page_id;
                                                             }
                                                         }
@@ -198,9 +238,9 @@ impl Collection  {
 
     }
 
-    fn get_nodes(&mut self, indexes: &Vec<usize>, dal: &mut DAL) -> Result<Vec<Node>, CustomError> {
+    fn get_nodes(&mut self, indexes: &Vec<usize>, tx: &mut Tx) -> Result<Vec<Node>, CustomError> {
         let root: Node;
-        match dal.get_node(self.root) {
+        match tx.get_node(self.root) {
             Ok(node) => {
                 root = node;
             }
@@ -212,7 +252,7 @@ impl Collection  {
         let mut child = root.clone();
         let mut nodes = vec![root];
         for i in 1..indexes.len() {
-            match dal.get_node(child.child_nodes[indexes[i]]) {
+            match tx.get_node(child.child_nodes[indexes[i]]) {
                 Ok(node) => {
                     child = node.clone();
                     nodes.push(node);
@@ -230,7 +270,7 @@ impl Collection  {
 
 #[cfg(test)]
 mod tests {
-    use crate::{dal::{Options, DAL, DEFAULT_OPTIONS}, meta, node::Node};
+    use crate::{dal::{Options, DEFAULT_OPTIONS}, db::DB};
     use core::panic;
     use std::{fs, path::Path};
 
@@ -254,10 +294,12 @@ mod tests {
             }
         }
 
-        match DAL::new_dal(options) {
-            Ok(ref mut dal) => {
-                let mut root_node = Node::empty();
-                match dal.write_node(&mut root_node) {
+        match DB::open(options) {
+            Ok(mut db) => {
+                let mut tx = db.write_tx();
+
+                let mut root_node = tx.new_node(vec![], vec![]);
+                match tx.write_node(&mut root_node) {
                     Ok(()) => {}
                     Err(_) => {
                         assert!(false,  "Root node creation failed!")
@@ -272,9 +314,9 @@ mod tests {
                 let key1 = "key1".to_string();
                 let value1 = "value1".to_string();
 
-                match collection.put(key1.clone(), value1.clone(), dal) {
+                match collection.put(key1.clone(), value1.clone(), &mut tx) {
                     Ok(()) => {
-                        match collection.find(key1.clone(), dal) {
+                        match collection.find(key1.clone(), &mut tx) {
                             Ok(optional_item) => {
                                 match optional_item {
                                     Some(item) => {
@@ -300,9 +342,9 @@ mod tests {
                 let key2 = "key2".to_string();
                 let value2 = "value2".to_string();
 
-                match collection.put(key2.clone(), value2.clone(), dal) {
+                match collection.put(key2.clone(), value2.clone(), &mut tx) {
                     Ok(()) => {
-                        match collection.find(key2.clone(), dal) {
+                        match collection.find(key2.clone(), &mut tx) {
                             Ok(optional_item) => {
                                 match optional_item {
                                     Some(item) => {
@@ -324,9 +366,18 @@ mod tests {
                     }
                 }
 
+                match tx.commit() {
+                    Ok(()) => {
+                        assert!(true, "Transaction commit successful");
+                    }
+                    Err(error) => {
+                        assert!(false, "Transaction commit unsuccessful with {:?}", error);
+                    }
+                }
+
             }
             Err(_) => {
-                assert!(false, "Dal not created successfully!")
+                assert!(false, "DB not created successfully!")
             }
         }
 
@@ -351,10 +402,12 @@ mod tests {
             }
         }
 
-        match DAL::new_dal(options) {
-            Ok(ref mut dal) => {
-                let mut root_node = Node::empty();
-                match dal.write_node(&mut root_node) {
+        match DB::open(options) {
+            Ok(mut db) => {
+                let mut tx = db.write_tx();
+
+                let mut root_node = tx.new_node(vec![], vec![]);
+                match tx.write_node(&mut root_node) {
                     Ok(_) => {},
                     Err(error) => {
                         panic!("Failed to create root node due to: {:?}", error);
@@ -370,7 +423,7 @@ mod tests {
                     let key = format!("key{}", i);
                     let value = format!("value{}", i);
 
-                    match collection.put(key.clone(), value.clone(), dal) {
+                    match collection.put(key.clone(), value.clone(), &mut tx) {
                         Ok(()) => {
 
                         }
@@ -380,11 +433,22 @@ mod tests {
                     }
                 }
 
+                match tx.commit() {
+                    Ok(()) => {
+                        assert!(true, "Transaction commit successful");
+                    }
+                    Err(error) => {
+                        assert!(false, "Transaction commit unsuccessful with {:?}", error)
+                    }
+                }
+
+                tx = db.read_tx();
+
                 for i in 1..=1000 {
                     let key = format!("key{}", i);
                     let value = format!("value{}", i);
 
-                    match collection.find(key.clone(), dal) {
+                    match collection.find(key.clone(), &mut tx) {
                         Ok(Some(item)) =>{
                             assert_eq!(value, item.value);
                         }
@@ -397,12 +461,23 @@ mod tests {
                     }
                 }
 
+                match tx.commit() {
+                    Ok(()) => {
+                        assert!(true, "Transaction commit successful");
+                    }
+                    Err(error) => {
+                        assert!(false, "Transaction commit unsuccessful with {:?}", error)
+                    }
+                }
+
+                tx = db.write_tx();
+
                 for i in 1..=1000 {
                     let key = format!("key{}", i);
                     
-                    match collection.remove(key.clone(), dal) {
+                    match collection.remove(key.clone(), &mut tx) {
                         Ok(()) => {
-                            match collection.find(key.clone(), dal) {
+                            match collection.find(key.clone(), &mut tx) {
                                 Ok(Some(item)) => {
                                     assert!(false, "Item not removed: {:?}", item);
                                 }
@@ -417,6 +492,15 @@ mod tests {
                         Err(error) => {
                             assert!(false, "Error occured while removing: {:?}", error)
                         }
+                    }
+                }
+
+                match tx.commit() {
+                    Ok(()) => {
+                        assert!(true, "Transaction commit successful");
+                    }
+                    Err(error) => {
+                        assert!(false, "Transaction commit unsuccessful with {:?}", error)
                     }
                 }
             }
