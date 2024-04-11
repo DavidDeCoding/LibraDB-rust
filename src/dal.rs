@@ -147,14 +147,14 @@ impl DAL {
         }
     }
 
-    fn read_meta(&mut self) -> Result<Meta, CustomError> {
+    fn read_meta(&self) -> Result<Meta, CustomError> {
         match self.read_page(META_PAGE_NUM) {
             Ok(page) => Ok(Meta::deserialize(page.data)),
             Err(error) => Err(error)
         }
     }
 
-    fn write_meta(&mut self) -> Result<Page, CustomError> {
+    fn write_meta(&self) -> Result<Page, CustomError> {
         let mut page = self.allocate_empty_page();
         page.id = META_PAGE_NUM;
         match self.meta.as_ref() {
@@ -170,7 +170,7 @@ impl DAL {
         }
     }
 
-    fn read_freelist(&mut self) -> Result<Freelist, CustomError> {
+    fn read_freelist(&self) -> Result<Freelist, CustomError> {
         match self.meta {
             Some(ref meta) => {
                 match self.read_page(meta.freelist_page) {
@@ -182,7 +182,7 @@ impl DAL {
         }
     }
 
-    pub fn write_freelist(&mut self) -> Result<Page, CustomError> {
+    pub fn write_freelist(&self) -> Result<Page, CustomError> {
         let mut page = self.allocate_empty_page();
         match self.meta.as_ref() {
             Some(meta) => {
@@ -215,35 +215,47 @@ impl DAL {
         }
     }
 
-    pub fn read_page(&mut self, page_id: u64) -> Result<Page, CustomError> {
-        let mut page = self.allocate_empty_page();
-        page.id = page_id;
+    pub fn read_page(&self, page_id: u64) -> Result<Page, CustomError> {
+        match self.file.try_clone() {
+            Ok(mut file) => {
+                let mut page = self.allocate_empty_page();
+                page.id = page_id;
 
-        let offset = page_id * (self.page_size as u64);
-        match self.file.seek(SeekFrom::Start(offset)) {
-            Ok(_) => {
-                match self.file.read_exact(&mut page.data) {
-                    Ok(()) => Ok(page),
-                    Err(error) => {
-                        Err(CustomError::new(error.to_string()))
+                let offset = page_id * (self.page_size as u64);
+                match file.seek(SeekFrom::Start(offset)) {
+                    Ok(_) => {
+                        match file.read_exact(&mut page.data) {
+                            Ok(()) => Ok(page),
+                            Err(error) => {
+                                Err(CustomError::new(error.to_string()))
+                            }
+                        }
                     }
-                }
-            }
-            Err(error) => Err(CustomError::new(error.to_string()))
-        }
-    }
-
-    fn write_page(&mut self, page: &Page) -> Result<(), CustomError> {
-        let offset = page.id * (self.page_size as u64);
-        match self.file.seek(SeekFrom::Start(offset)) {
-            Ok(_) => {
-                match self.file.write_all(&page.data) {
-                    Ok(()) => Ok(()),
                     Err(error) => Err(CustomError::new(error.to_string()))
                 }
             }
             Err(error) => Err(CustomError::new(error.to_string()))
         }
+        
+    }
+
+    fn write_page(&self, page: &Page) -> Result<(), CustomError> {
+        match self.file.try_clone() {
+            Ok(mut file) => {
+                let offset = page.id * (self.page_size as u64);
+                match file.seek(SeekFrom::Start(offset)) {
+                    Ok(_) => {
+                        match file.write_all(&page.data) {
+                            Ok(()) => Ok(()),
+                            Err(error) => Err(CustomError::new(error.to_string()))
+                        }
+                    }
+                    Err(error) => Err(CustomError::new(error.to_string()))
+                }
+            }
+            Err(error) => Err(CustomError::new(error.to_string()))
+        }
+        
     }
 
     pub fn max_threshold(&self) -> f32 {
@@ -254,7 +266,7 @@ impl DAL {
         self.min_fill_percent * (self.page_size as f32)
     }
 
-    pub fn get_node(&mut self, page_id: u64) -> Result<Node, CustomError> {
+    pub fn get_node(&self, page_id: u64) -> Result<Node, CustomError> {
         match self.read_page(page_id) {
             Ok(page) => {
                 match Node::deserialize(page.data) {

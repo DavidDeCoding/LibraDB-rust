@@ -1,7 +1,7 @@
 use crate::consts::{COLLECTION_SIZE, PAGE_ID_SIZE};
 use crate::error::CustomError;
 use crate::node::{Item, Node};
-use crate::tx::Tx;
+use crate::tx::{Tx, TxMut};
 
 #[derive(Debug)]
 pub struct Collection {
@@ -75,7 +75,7 @@ impl Collection  {
         return id;
     }
 
-    pub fn find(&mut self, key: String, tx: &mut Tx) -> Result<Option<Item>, CustomError> {
+    pub fn find(&self, key: String, tx: &Tx) -> Result<Option<Item>, CustomError> {
         let root = tx.get_node(self.root);
         match root {
             Ok(root) => {
@@ -96,12 +96,40 @@ impl Collection  {
         
     }
 
-    pub fn put(&mut self, key: String, value: String, tx: &mut Tx) -> Result<(), CustomError> {
+    pub fn find_mut(&self, key: String, tx: &TxMut) -> Result<Option<Item>, CustomError> {
+        let root = tx.get_node(self.root);
+        match root {
+            Ok(root) => {
+                match root.find_key_mut(&key, true, tx) {
+                    Ok((index, containing_node, _)) => {
+                        if index == usize::MAX {
+                            return Ok(None);
+                        }
+                        
+                        Ok(Some(containing_node.items[index].clone()))
+                    }
+                    Err(error) => Err(error)
+                }
+            }
+            Err(error) => Err(error)
+        }
+
+        
+    }
+
+    pub fn put(&mut self, key: String, value: String, tx: &mut TxMut) -> Result<(), CustomError> {
 
         let item = Item::new(key, value);
         let mut root: Node;
         if self.root == u64::MAX {
-            root = tx.new_node(vec![], vec![]);
+            match tx.new_node(vec![], vec![]) {
+                Ok(node) => {
+                    root = node;
+                }
+                Err(error) => {
+                    return Err(error);
+                }
+            }
             match tx.write_node(&mut root) {
                 Ok(()) => {
                     self.root = root.page_id;
@@ -121,7 +149,7 @@ impl Collection  {
             }
         }
 
-        match root.find_key(&item.key, false, tx) {
+        match root.find_key_mut(&item.key, false, tx) {
             Ok((insertion_index, node_to_insert_in, ancestors_index)) => {
                 let mut node_to_insert_in = node_to_insert_in;
                 
@@ -150,7 +178,15 @@ impl Collection  {
                         
                         let mut root = ancestors[0].clone();
                         if root.is_over_populated(tx) {
-                            let mut new_root = tx.new_node(vec![], vec![root.page_id]);
+                            let mut new_root;
+                            match tx.new_node(vec![], vec![root.page_id]) {
+                                Ok(node) => {
+                                    new_root = node;
+                                }
+                                Err(error) => {
+                                    return Err(error);
+                                }
+                            }
                             new_root.split(&mut root, 0, tx);
 
                             match tx.write_node(&mut new_root) {
@@ -177,10 +213,10 @@ impl Collection  {
         
     }
 
-    pub fn remove(&mut self, key: String, tx: &mut Tx) -> Result<(), CustomError> {
+    pub fn remove(&mut self, key: String, tx: &mut TxMut) -> Result<(), CustomError> {
         match tx.get_node(self.root) {
             Ok(root) => {
-                match root.find_key(&key, true, tx) {
+                match root.find_key_mut(&key, true, tx) {
                     Ok((remove_item_index, mut node_to_remove_from, mut ancestor_indexes)) => {
 
                         if remove_item_index == usize::MAX {
@@ -238,7 +274,7 @@ impl Collection  {
 
     }
 
-    fn get_nodes(&mut self, indexes: &Vec<usize>, tx: &mut Tx) -> Result<Vec<Node>, CustomError> {
+    fn get_nodes(&mut self, indexes: &Vec<usize>, tx: &mut TxMut) -> Result<Vec<Node>, CustomError> {
         let root: Node;
         match tx.get_node(self.root) {
             Ok(node) => {
@@ -282,7 +318,7 @@ mod tests {
             page_size: DEFAULT_OPTIONS.page_size,
             min_fill_percent: DEFAULT_OPTIONS.min_fill_percent,
             max_fill_percent: DEFAULT_OPTIONS.max_fill_percent,
-            path: "./db_collection_test_internal"
+            path: "./db_collection_test_internal_1"
         };
 
         if Path::new(&options.path).exists() {
@@ -295,10 +331,19 @@ mod tests {
         }
 
         match DB::open(options) {
-            Ok(mut db) => {
+            Ok(db) => {
                 let mut tx = db.write_tx();
 
-                let mut root_node = tx.new_node(vec![], vec![]);
+                let mut root_node;
+                match tx.new_node(vec![], vec![]) {
+                    Ok(node) => {
+                        root_node = node;
+                    }
+                    Err(error) => {
+                        panic!("Failed to create new node: {:?}", error);
+                    }
+                }
+                
                 match tx.write_node(&mut root_node) {
                     Ok(()) => {}
                     Err(_) => {
@@ -316,7 +361,7 @@ mod tests {
 
                 match collection.put(key1.clone(), value1.clone(), &mut tx) {
                     Ok(()) => {
-                        match collection.find(key1.clone(), &mut tx) {
+                        match collection.find_mut(key1.clone(), &mut tx) {
                             Ok(optional_item) => {
                                 match optional_item {
                                     Some(item) => {
@@ -344,7 +389,7 @@ mod tests {
 
                 match collection.put(key2.clone(), value2.clone(), &mut tx) {
                     Ok(()) => {
-                        match collection.find(key2.clone(), &mut tx) {
+                        match collection.find_mut(key2.clone(), &mut tx) {
                             Ok(optional_item) => {
                                 match optional_item {
                                     Some(item) => {
@@ -390,7 +435,7 @@ mod tests {
             page_size: DEFAULT_OPTIONS.page_size,
             min_fill_percent: DEFAULT_OPTIONS.min_fill_percent,
             max_fill_percent: DEFAULT_OPTIONS.max_fill_percent,
-            path: "./db_collection_test_internal"
+            path: "./db_collection_test_internal_2"
         };
 
         if Path::new(&options.path).exists() {
@@ -403,14 +448,22 @@ mod tests {
         }
 
         match DB::open(options) {
-            Ok(mut db) => {
+            Ok(ref mut db) => {
                 let mut tx = db.write_tx();
 
-                let mut root_node = tx.new_node(vec![], vec![]);
+                let mut root_node;
+                match tx.new_node(vec![], vec![]) {
+                    Ok(node) => {
+                        root_node = node;
+                    }
+                    Err(error) => {
+                        panic!("Failed to create new root node due to: {:?}", error);
+                    }
+                }
                 match tx.write_node(&mut root_node) {
                     Ok(_) => {},
                     Err(error) => {
-                        panic!("Failed to create root node due to: {:?}", error);
+                        panic!("Failed to write root node due to: {:?}", error);
                     }
                 }
 
@@ -442,13 +495,13 @@ mod tests {
                     }
                 }
 
-                tx = db.read_tx();
+                let tx = db.read_tx();
 
                 for i in 1..=1000 {
                     let key = format!("key{}", i);
                     let value = format!("value{}", i);
 
-                    match collection.find(key.clone(), &mut tx) {
+                    match collection.find(key.clone(), &tx) {
                         Ok(Some(item)) =>{
                             assert_eq!(value, item.value);
                         }
@@ -470,14 +523,14 @@ mod tests {
                     }
                 }
 
-                tx = db.write_tx();
+                let mut tx = db.write_tx();
 
                 for i in 1..=1000 {
                     let key = format!("key{}", i);
                     
                     match collection.remove(key.clone(), &mut tx) {
                         Ok(()) => {
-                            match collection.find(key.clone(), &mut tx) {
+                            match collection.find_mut(key.clone(), &mut tx) {
                                 Ok(Some(item)) => {
                                     assert!(false, "Item not removed: {:?}", item);
                                 }
