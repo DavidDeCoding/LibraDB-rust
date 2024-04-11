@@ -32,7 +32,7 @@ impl DB {
 mod tests {
     use std::{fs, path::Path};
 
-    use crate::{collection, dal::{Options, DEFAULT_OPTIONS}};
+    use crate::dal::{Options, DEFAULT_OPTIONS};
 
     use super::DB;
 
@@ -62,7 +62,7 @@ mod tests {
 
                 match tx.create_collection(collection_name) {
                     Ok(ref mut collection) => {
-                        match collection.put("0".to_string(), "1".to_string(), &mut tx) {
+                        match collection.put("0".to_string(), "1".as_bytes().to_owned(), &mut tx) {
                             Ok(()) => {}
                             Err(error) => {
                                 assert!(false, "Put failed with error: {:?}", error);
@@ -72,7 +72,7 @@ mod tests {
                         match collection.find_mut("0".to_string(), &tx) {
                             Ok(Some(item)) => {
                                 assert_eq!(item.key, "0".to_string());
-                                assert_eq!(item.value, "1".to_string());
+                                assert_eq!(item.value, "1".as_bytes().to_owned());
                             }
                             Ok(None) => {
                                 assert!(false, "No item found");

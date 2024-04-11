@@ -154,7 +154,7 @@ impl DAL {
         }
     }
 
-    fn write_meta(&self) -> Result<Page, CustomError> {
+    pub fn write_meta(&self) -> Result<Page, CustomError> {
         let mut page = self.allocate_empty_page();
         page.id = META_PAGE_NUM;
         match self.meta.as_ref() {
@@ -275,7 +275,9 @@ impl DAL {
                         node.page_id = page_id;
                         Ok(node)
                     }
-                    Err(error) => Err(error)
+                    Err(error) => {
+                        Err(error)
+                    }
                 }
                 
             }

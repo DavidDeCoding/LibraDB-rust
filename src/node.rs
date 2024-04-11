@@ -5,12 +5,12 @@ use crate::tx::{Tx, TxMut};
 #[derive(Clone, Debug)]
 pub struct Item {
     pub key: String,
-    pub value: String,
+    pub value: Vec<u8>,
 }
 
 impl Item {
 
-    pub fn new(key: String, value: String) -> Item {
+    pub fn new(key: String, value: Vec<u8>) -> Item {
         Item {
             key,
             value
@@ -124,14 +124,14 @@ impl Node
             }
 
             let key_len = item.key.as_bytes().len();
-            let val_len = item.value.as_bytes().len();
+            let val_len = item.value.len();
 
             let offset = right_pos - key_len - val_len - 2;
             buf[left_pos..left_pos+2].clone_from_slice(&(offset as u16).to_le_bytes());
             left_pos += 2;
 
             right_pos -= val_len;
-            buf[right_pos..right_pos+val_len].clone_from_slice(&item.value.as_bytes());
+            buf[right_pos..right_pos+val_len].clone_from_slice(item.value.as_slice());
 
             right_pos -= 1;
             buf[right_pos..right_pos+1].clone_from_slice(&(val_len as u8).to_le_bytes());
@@ -212,16 +212,7 @@ impl Node
             offset += 1;
             let val_len = u8::from_le_bytes(u8_bytes) as usize;
 
-            let value: String;
-            match String::from_utf8(buf[offset..offset+val_len].to_vec()) {
-                Ok(string) => {
-                    value = string;
-                }
-                Err(error) => {
-                    return Err(CustomError::new(error.to_string()));
-                }
-            }
-            node.items.push(Item::new(key, value));
+            node.items.push(Item::new(key, buf[offset..offset+val_len].to_vec()));
         }
 
         if is_leaf == 0 {

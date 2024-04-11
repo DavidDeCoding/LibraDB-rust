@@ -52,11 +52,13 @@ impl <'a> Tx<'a> {
 
     pub fn get_collection(&self, name: String) -> Result<Option<Collection>, CustomError> {
         match self.get_root_collection() {
-            Ok(mut root_collection) => {
+            Ok(root_collection) => {
                 match root_collection.find(name, self) {
                     Ok(Some(item)) => Ok(Some(Collection::deserialize(item))),
                     Ok(None) => Ok(None),
-                    Err(error) => Err(error)
+                    Err(error) => {
+                        Err(error)
+                    }
                 }
             }
             Err(error) => Err(error)
@@ -75,6 +77,7 @@ impl <'a> Tx<'a> {
 }
 
 pub struct TxMut<'a> {
+    meta_root: Option<u64>,
     dirty_nodes: HashMap<u64, Node>,
     pages_to_delete: Vec<u64>,
 
@@ -87,6 +90,7 @@ impl<'a> TxMut<'a> {
     pub fn new(db: &'a DB) -> TxMut<'a> {
         let dal = db.dal.write().unwrap();
         TxMut {
+            meta_root: None,
             dirty_nodes: HashMap::new(),
             pages_to_delete: vec![],
             allocated_page_ids: vec![],
@@ -122,6 +126,7 @@ impl<'a> TxMut<'a> {
     }
 
     pub fn rollback(mut self) -> Result<(), CustomError> {
+        self.meta_root.take();
         self.dirty_nodes.drain();
         self.pages_to_delete.drain(0..);
         while let Some(page_id) = self.allocated_page_ids.pop() {
@@ -168,6 +173,24 @@ impl<'a> TxMut<'a> {
             }
         }
 
+        if let Some(meta_root) = self.meta_root {
+            match self.dal.meta {
+                Some(ref mut meta) => {
+                    meta.root = meta_root;
+                    match self.dal.write_meta() {
+                        Ok(_) => {}
+                        Err(error) => {
+                            return Err(error);
+                        }
+                    }
+                }
+                None => {
+                    return Err(CustomError::new("Meta not initialized".to_string()))
+                }
+            }
+        }
+
+        self.meta_root.take();
         self.dirty_nodes.drain();
         self.allocated_page_ids.drain(0..);
 
@@ -177,6 +200,10 @@ impl<'a> TxMut<'a> {
     }
 
     pub fn get_root_collection(&mut self) -> Result<Collection, CustomError> {
+        if let Some(meta_root) = self.meta_root {
+            return Ok(Collection::new("".to_string(), meta_root));
+        }
+
         match self.dal.meta {
             Some(ref meta) => Ok(Collection::new("".to_string(), meta.root)),
             None => {
@@ -207,29 +234,37 @@ impl<'a> TxMut<'a> {
             Err(error) => {
                 return Err(error);
             }
-        } 
+        }
         match self.write_node(&mut node) {
             Ok(()) => {
                 let collection = Collection::new(name, node.page_id);
                 self.write_new_collection(collection)
             }
-            Err(error) => Err(error)
+            Err(error) => {
+                Err(error)
+            }
         }
     }
 
     fn write_new_collection(&mut self, collection: Collection) -> Result<Collection, CustomError>  {
         let mut collection = collection;
         let collection_in_bytes_item = collection.serialize();
-
+        
         match self.get_root_collection() {
-            Ok(mut root_collection) => {
+            Ok(ref mut root_collection) => {
                 match root_collection.put(collection.name.clone(), collection_in_bytes_item.value, self) {
-                    Ok(()) => Ok(collection),
-                    Err(error) => Err(error)
+                    Ok(()) => {
+                        self.meta_root = Some(root_collection.root);
+                        Ok(collection)
+                    }
+                    Err(error) => {
+                        Err(error)
+                    }
                 }
-
             }
-            Err(error) => Err(error)
+            Err(error) => {
+                Err(error)
+            }
         }
     }
 
@@ -237,6 +272,22 @@ impl<'a> TxMut<'a> {
         match self.get_root_collection() {
             Ok(mut root_collection) => root_collection.remove(name, self),
             Err(error) => Err(error)
+        }
+    }
+
+    pub fn update_collection(&mut self, collection: &mut Collection) -> Result<(), CustomError> {
+        let collection_in_bytes_item = collection.serialize();
+        
+        match self.get_root_collection() {
+            Ok(ref mut root_collection) => {
+                match root_collection.put(collection.name.clone(), collection_in_bytes_item.value, self) {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(error)
+                }
+            }
+            Err(error) => {
+                Err(error)
+            }
         }
     }
 
@@ -465,7 +516,7 @@ mod tests {
                 let mut tx = db.write_tx();
 
                 let mut child_0;
-                match tx.new_node(vec![Item::new("1".to_string(), "1".to_string()), Item::new("2".to_string(), "2".to_string())], vec![]) {
+                match tx.new_node(vec![Item::new("1".to_string(), "1".as_bytes().to_owned()), Item::new("2".to_string(), "2".as_bytes().to_owned())], vec![]) {
                     Ok(node) => {
                         child_0 = node;
                     }
@@ -481,7 +532,7 @@ mod tests {
                 }
 
                 let mut child_1; 
-                match tx.new_node(vec![Item::new("4".to_string(), "4".to_string()), Item::new("5".to_string(), "5".to_string())], vec![]) {
+                match tx.new_node(vec![Item::new("4".to_string(), "4".as_bytes().to_owned()), Item::new("5".to_string(), "5".as_bytes().to_owned())], vec![]) {
                     Ok(node) => {
                         child_1 = node;
                     }
@@ -497,7 +548,7 @@ mod tests {
                 }
 
                 let mut root;
-                match tx.new_node(vec![Item::new("3".to_string(), "3".to_string())], vec![child_0.page_id, child_1.page_id]) {
+                match tx.new_node(vec![Item::new("3".to_string(), "3".as_bytes().to_owned())], vec![child_0.page_id, child_1.page_id]) {
                     Ok(node) => {
                         root = node;
                     }
@@ -530,7 +581,7 @@ mod tests {
 
                 match tx2.get_collection("test_collection".to_string()) {
                     Ok(Some(mut collection)) => {
-                        let item = Item::new("9".to_string(), "9".to_string());
+                        let item = Item::new("9".to_string(), "9".as_bytes().to_owned());
                         match collection.put(item.key, item.value, &mut tx2) {
                             Ok(()) => {},
                             Err(error) => {

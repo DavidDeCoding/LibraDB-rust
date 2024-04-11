@@ -6,7 +6,7 @@ use crate::tx::{Tx, TxMut};
 #[derive(Debug)]
 pub struct Collection {
     pub name: String,
-    root: u64,
+    pub root: u64,
     counter: u64
 }
 
@@ -40,7 +40,7 @@ impl Collection  {
         let bytes_as_str = unsafe {
             std::str::from_utf8_unchecked(&bytes)
         };
-        Item::new(self.name.clone(), bytes_as_str.to_owned())
+        Item::new(self.name.clone(), bytes_as_str.as_bytes().to_owned())
 
     }
 
@@ -49,7 +49,7 @@ impl Collection  {
         collection.name = item.key;
 
         if item.value.len() > 0 {
-            let buf = item.value.as_bytes();
+            let buf = item.value;
 
             let mut left_pos = 0;
             let mut u64_bytes = [0u8; PAGE_ID_SIZE];
@@ -117,9 +117,9 @@ impl Collection  {
         
     }
 
-    pub fn put(&mut self, key: String, value: String, tx: &mut TxMut) -> Result<(), CustomError> {
+    pub fn put(&mut self, key: String, value: Vec<u8>, tx: &mut TxMut) -> Result<(), CustomError> {
 
-        let item = Item::new(key, value);
+        let item = Item::new(key.clone(), value);
         let mut root: Node;
         if self.root == u64::MAX {
             match tx.new_node(vec![], vec![]) {
@@ -192,6 +192,12 @@ impl Collection  {
                             match tx.write_node(&mut new_root) {
                                 Ok(()) => {
                                     self.root = new_root.page_id;
+                                    match tx.update_collection(self) {
+                                        Ok(()) => {}
+                                        Err(error) => {
+                                            return Err(error);
+                                        }
+                                    }
                                 },
                                 Err(error) => {
                                     return Err(error);
@@ -210,7 +216,6 @@ impl Collection  {
                 return Err(error);
             }
         }
-        
     }
 
     pub fn remove(&mut self, key: String, tx: &mut TxMut) -> Result<(), CustomError> {
@@ -242,6 +247,12 @@ impl Collection  {
                                                             if root.items.len() == 0 && root.child_nodes.len() > 0 {
                                                                 tx.delete_node(&root);
                                                                 self.root = ancestors[1].page_id;
+                                                                match tx.update_collection(self) {
+                                                                    Ok(()) => {}
+                                                                    Err(error) => {
+                                                                        return Err(error);
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                         Err(error) => {
@@ -357,7 +368,7 @@ mod tests {
                 );
 
                 let key1 = "key1".to_string();
-                let value1 = "value1".to_string();
+                let value1 = "value1".as_bytes().to_owned();
 
                 match collection.put(key1.clone(), value1.clone(), &mut tx) {
                     Ok(()) => {
@@ -385,7 +396,7 @@ mod tests {
 
 
                 let key2 = "key2".to_string();
-                let value2 = "value2".to_string();
+                let value2 = "value2".as_bytes().to_owned();
 
                 match collection.put(key2.clone(), value2.clone(), &mut tx) {
                     Ok(()) => {
@@ -474,7 +485,7 @@ mod tests {
 
                 for i in 1..=1000 {
                     let key = format!("key{}", i);
-                    let value = format!("value{}", i);
+                    let value = format!("value{}", i).as_bytes().to_owned();
 
                     match collection.put(key.clone(), value.clone(), &mut tx) {
                         Ok(()) => {
@@ -499,7 +510,7 @@ mod tests {
 
                 for i in 1..=1000 {
                     let key = format!("key{}", i);
-                    let value = format!("value{}", i);
+                    let value = format!("value{}", i).as_bytes().to_owned();
 
                     match collection.find(key.clone(), &tx) {
                         Ok(Some(item)) =>{
