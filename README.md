@@ -122,7 +122,7 @@ match tx_writer.commit() {
 ```
 
 ### Auto generating ID
-The `Collection.ID()` function returns an integer to be used as a unique identifier for key/value pairs.
+The `collection.id()` function returns an integer to be used as a unique identifier for key/value pairs.
 ```rust
 let mut tx_writer = db.write_tx();
 
@@ -146,8 +146,8 @@ match tx_writer.commit() {
 }
 ```
 ## Key-Value Pairs
-Key/value pairs reside inside collections. CRUD operations are possible using the methods `Collection.Put` 
-`Collection.Find` `Collection.Remove` as shown below.   
+Key/value pairs reside inside collections. CRUD operations are possible using the methods `collection.put` 
+`collection.find` `collection.remove` as shown below.   
 ```rust
 let mut tx_writer = db.write_tx();
 
